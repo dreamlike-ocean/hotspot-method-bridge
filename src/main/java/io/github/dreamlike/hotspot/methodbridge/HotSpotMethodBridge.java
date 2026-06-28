@@ -5,6 +5,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.concurrent.locks.LockSupport;
 
 public final class HotSpotMethodBridge {
@@ -63,7 +64,7 @@ public final class HotSpotMethodBridge {
             throw new IllegalStateException("target already has nmethod");
         }
 
-        NativeCode rawCode = MethodRuntimeBridge.installCodeBlob(code);
+        NativeCode rawCode = MethodRuntimeBridge.installCodeBlob(rawCodeBlobName(target, code), code);
         long i2cEntry = MethodRuntimeBridge.i2cEntry(targetMethod);
         suppressTargetCompilation(targetMethod);
 
@@ -74,6 +75,11 @@ public final class HotSpotMethodBridge {
         putAddress(targetMethod + JVM_METHOD_LAYOUT.methodInterpretedEntryOffset, i2cEntry);
 
         return new RawCodeLink(targetMethod, rawCode.blob(), rawCode.entry(), rawCode.size(), i2cEntry);
+    }
+
+    private static String rawCodeBlobName(Method target, byte[] code) {
+        return "hotspot-method-bridge " + target.toGenericString()
+                + " " + code.length + "b/" + Integer.toUnsignedString(Arrays.hashCode(code), 16);
     }
 
     private static void suppressTargetCompilation(long targetMethod) {

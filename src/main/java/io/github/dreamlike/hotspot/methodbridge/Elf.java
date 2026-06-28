@@ -1,9 +1,7 @@
 package io.github.dreamlike.hotspot.methodbridge;
 
 import java.lang.foreign.FunctionDescriptor;
-import java.lang.foreign.Linker;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.SymbolLookup;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.ByteOrder;
@@ -11,7 +9,6 @@ import java.nio.ByteOrder;
 final class Elf implements NativeSymbols {
     private static final int SHT_SYMTAB = 2;
     private static final int SHT_DYNSYM = 11;
-    private static final MemorySegment RAW_CODE_BLOB_NAME = java.lang.foreign.Arena.global().allocateFrom("hotspot-method-bridge raw code");
     private static final MethodHandle CODE_CACHE_BLOB_CREATE_MH = HotSpotMethodBridge.LINKER.downcallHandle(
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
 
@@ -24,6 +21,7 @@ final class Elf implements NativeSymbols {
     private final int sectionHeaderSize;
     private final int sectionCount;
     private final long base;
+    private final MethodHandle clearCache;
 
     Elf() {
         try {
@@ -47,6 +45,7 @@ final class Elf implements NativeSymbols {
             sectionHeaderSize = Short.toUnsignedInt(elfShort(58));
             sectionCount = Short.toUnsignedInt(elfShort(60));
             base = VmStructs.runtimeAddress("gHotSpotVMStructs") - fileSymbol("gHotSpotVMStructs");
+            clearCache = clearCacheHandle();
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
@@ -77,18 +76,18 @@ final class Elf implements NativeSymbols {
     }
 
     @Override
-    public NativeCode installCodeBlob(byte[] code) {
+    public NativeCode installCodeBlob(String name, byte[] code) {
         try {
             MemorySegment blob = (MemorySegment) CODE_CACHE_BLOB_CREATE_MH.invokeExact(
                     MemorySegment.ofAddress(bufferBlobCreate()),
-                    RAW_CODE_BLOB_NAME,
+                    java.lang.foreign.Arena.global().allocateFrom(name),
                     code.length);
             if (blob.address() == 0) {
                 throw new OutOfMemoryError("BufferBlob::create failed");
             }
             long entry = blob.address() + HotSpotMethodBridge.CODE_BLOB_LAYOUT.codeOffset();
             HotSpotMethodBridge.memory(entry, code.length).copyFrom(MemorySegment.ofArray(code));
-            LinuxClearCache.clearCache(entry, code.length);
+            clearCache(entry, code.length);
             return new NativeCode(blob.address(), entry, code.length);
         } catch (Throwable e) {
             if (e instanceof RuntimeException runtimeException) {
@@ -101,19 +100,32 @@ final class Elf implements NativeSymbols {
         }
     }
 
-    private static final class LinuxClearCache {
-        private static final MethodHandle HANDLE = handle();
-
-        private static void clearCache(long start, int size) throws Throwable {
-            HANDLE.invokeExact(MemorySegment.ofAddress(start), MemorySegment.ofAddress(start + size));
+    private MethodHandle clearCacheHandle() {
+        long clearCacheAddress = fileSymbol("__clear_cache");
+        if (clearCacheAddress != 0) {
+            return HotSpotMethodBridge.LINKER.downcallHandle(
+                    MemorySegment.ofAddress(base + clearCacheAddress),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
         }
 
-        private static MethodHandle handle() {
+        long invalidateRangeAddress = fileSymbol("_ZN14AbstractICache16invalidate_rangeEPhi");
+        if (invalidateRangeAddress != 0) {
             return HotSpotMethodBridge.LINKER.downcallHandle(
-                    SymbolLookup.libraryLookup("libgcc_s.so.1", java.lang.foreign.Arena.global())
-                            .find("__clear_cache")
-                            .orElseThrow(() -> new IllegalStateException("libgcc_s __clear_cache not found")),
-                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+                    MemorySegment.ofAddress(base + invalidateRangeAddress),
+                    FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
+        }
+
+        return null;
+    }
+
+    private void clearCache(long start, int size) throws Throwable {
+        if (clearCache == null) {
+            return;
+        }
+        if (clearCache.type().parameterType(1) == int.class) {
+            clearCache.invokeExact(MemorySegment.ofAddress(start), size);
+        } else {
+            clearCache.invokeExact(MemorySegment.ofAddress(start), MemorySegment.ofAddress(start + size));
         }
     }
 

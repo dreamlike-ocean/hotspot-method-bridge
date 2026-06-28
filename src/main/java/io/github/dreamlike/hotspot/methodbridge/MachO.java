@@ -65,8 +65,8 @@ final class MachO implements NativeSymbols {
     }
 
     @Override
-    public NativeCode installCodeBlob(byte[] code) {
-        return InstallerHolder.CODE_BLOB_INSTALLER.install(code, bufferBlobCreate(), currentThreadEnableWx());
+    public NativeCode installCodeBlob(String name, byte[] code) {
+        return InstallerHolder.CODE_BLOB_INSTALLER.install(name, code, bufferBlobCreate(), currentThreadEnableWx());
     }
 
     static MemorySegment executableMemory(byte[] code) {
@@ -170,7 +170,6 @@ final class MachO implements NativeSymbols {
 
     // 这个安装 trampoline 只给 macOS/aarch64 用：切 WXWrite，写 CodeCache，再切回 WXExec。
     private static final class MachOAArch64CodeBlobInstaller {
-        private static final MemorySegment RAW_CODE_BLOB_NAME = java.lang.foreign.Arena.global().allocateFrom("hotspot-method-bridge raw code");
         private static final MethodHandle HANDLE = installHandle();
         private static final int X0 = 0;
         private static final int X1 = 1;
@@ -197,13 +196,13 @@ final class MachO implements NativeSymbols {
         private final HashMap<String, Integer> labels = new HashMap<>();
         private final ArrayList<Patch> patches = new ArrayList<>();
 
-        public NativeCode install(byte[] code, long bufferBlobCreate, long currentThreadEnableWx) {
+        public NativeCode install(String name, byte[] code, long bufferBlobCreate, long currentThreadEnableWx) {
             try (java.lang.foreign.Arena arena = java.lang.foreign.Arena.ofConfined()) {
                 // 业务机器码放进 HotSpot CodeCache；mmap 只承载安装用 trampoline。
                 MemorySegment source = arena.allocate(code.length);
                 source.copyFrom(MemorySegment.ofArray(code));
                 MemorySegment entry = (MemorySegment) HANDLE.invokeExact(
-                        RAW_CODE_BLOB_NAME,
+                        java.lang.foreign.Arena.global().allocateFrom(name),
                         (long) code.length,
                         source,
                         HotSpotMethodBridge.CODE_BLOB_LAYOUT.codeOffset(),

@@ -19,6 +19,6 @@
 - `BufferBlob`：CodeCache 中不带 `nmethod` 语义的普通代码块；raw 机器码放这里，不能把 `BufferBlob*` 写进 `Method::_code`；看 `src/hotspot/share/code/codeBlob.cpp`。
 - macOS/aarch64 W^X：`WXWrite/WXExec` 是当前线程对 `MAP_JIT` 区域的写/执行切换；FFM stub 在 CodeCache 中，不能在 `WXWrite` 状态返回 Java/FFM；看 `src/hotspot/share/runtime/os.hpp` 和 `src/hotspot/os_cpu/bsd_aarch64/os_bsd_aarch64.cpp`。
 - aarch64 icache flush：raw 代码写进 CodeCache 后要刷 D/I cache；HotSpot 平台实现看 `src/hotspot/os_cpu/bsd_aarch64/icache_bsd_aarch64.hpp` 和 `src/hotspot/os_cpu/linux_aarch64/icache_linux_aarch64.hpp`。
-- trampoline：只属于 `MachO.installCodeBlob`。macOS/aarch64 在普通 `mmap + mprotect(RX)` 内放一个很小的安装 stub；stub 负责切 W^X、调用 `BufferBlob::create`、拷贝 byte[]、flush icache，不承载业务机器码。`Elf.installCodeBlob` 不走 trampoline，直接 FFM 调 `BufferBlob::create`、写 CodeCache、调 `libgcc_s.__clear_cache`。
+- trampoline：只属于 `MachO.installCodeBlob`。macOS/aarch64 在普通 `mmap + mprotect(RX)` 内放一个很小的安装 stub；stub 负责切 W^X、调用 `BufferBlob::create`、拷贝 byte[]、flush icache，不承载业务机器码。`Elf.installCodeBlob` 不走 trampoline，直接 FFM 调 `BufferBlob::create`、写 CodeCache，再按符号探测选择 `__clear_cache`、`AbstractICache::invalidate_range` 或 no-op。
 - `WhiteBox::compile_method`：本项目绕过 Java WhiteBox API，直接调用内部 C++ 入口强制编译 carrier；看 `src/hotspot/share/prims/whitebox.hpp` 和 `src/hotspot/share/prims/whitebox.cpp`。
 - C1/C2 inline 判断：确认 `dont_inline` 是否生效时看 `src/hotspot/share/c1/c1_GraphBuilder.cpp` 和 `src/hotspot/share/opto/bytecodeInfo.cpp`。

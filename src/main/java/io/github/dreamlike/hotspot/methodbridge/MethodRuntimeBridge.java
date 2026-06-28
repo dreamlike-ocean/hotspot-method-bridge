@@ -44,7 +44,7 @@ final class MethodRuntimeBridge {
         }
     }
 
-    static NativeCode installCodeBlob(byte[] code) {
-        return HotSpotMethodBridge.NATIVE_SYMBOLS.installCodeBlob(code);
+    static NativeCode installCodeBlob(String name, byte[] code) {
+        return HotSpotMethodBridge.NATIVE_SYMBOLS.installCodeBlob(name, code);
     }
 }
