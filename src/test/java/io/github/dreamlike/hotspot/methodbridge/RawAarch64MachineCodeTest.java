@@ -36,20 +36,9 @@ final class RawAarch64MachineCodeTest {
     }
 
     @Test
-    @EnabledOnOs(OS.MAC)
-    @DisplayName("macOS aarch64: raw 机器码返回 Object oop")
-    void macAarch64ObjectAddressMatchesUnsafe() {
-        objectAddressMatchesUnsafe();
-    }
-
-    @Test
-    @EnabledOnOs(OS.LINUX)
-    @DisplayName("Linux aarch64: raw 机器码返回 Object oop")
-    void linuxAarch64ObjectAddressMatchesUnsafe() {
-        objectAddressMatchesUnsafe();
-    }
-
-    private static void objectAddressMatchesUnsafe() {
+    @EnabledOnOs({OS.MAC, OS.LINUX})
+    @DisplayName("raw 机器码返回 Object oop")
+    void ojectAddressMatchesUnsafe() {
         Object value = new Object();
         long actual = getObjectAddress(value);
         long expected = unsafeObjectAddress(value);
