@@ -14,6 +14,8 @@ import java.lang.reflect.Method;
 import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.concurrent.locks.LockSupport;
 
@@ -27,12 +29,33 @@ public final class HotSpotMethodBridge {
     private static final int METHOD_FLAGS_TARGET_BITS = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 12);
     private static final VarHandle INT_HANDLE = ValueLayout.JAVA_INT.varHandle();
     private static final NMethodLayout N_METHOD_LAYOUT = NMethodLayout.load();
+    private static final CodeBlobLayout CODE_BLOB_LAYOUT = CodeBlobLayout.load();
+    private static final NarrowOopEncoding NARROW_OOP_ENCODING = NarrowOopEncoding.load();
     private static final NativeSymbols NATIVE_SYMBOLS = NativeSymbols.current();
     private static final MethodHandle JNI_GET_CREATED_JAVA_VMS = LINKER.downcallHandle(
             SymbolLookup.libraryLookup(VmStructs.libjvm(), Arena.global())
                     .find("JNI_GetCreatedJavaVMs")
                     .orElseThrow(),
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+    private static final MethodHandle MMAP = LINKER.downcallHandle(
+            LINKER.defaultLookup().find("mmap").orElseThrow(),
+            FunctionDescriptor.of(
+                    ValueLayout.ADDRESS,
+                    ValueLayout.ADDRESS,
+                    ValueLayout.JAVA_LONG,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_INT,
+                    ValueLayout.JAVA_LONG));
+    private static final MethodHandle MPROTECT = LINKER.downcallHandle(
+            LINKER.defaultLookup().find("mprotect").orElseThrow(),
+            FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT));
+    private static final long MAP_FAILED = -1L;
+    private static final int PROT_READ = 0x1;
+    private static final int PROT_WRITE = 0x2;
+    private static final int PROT_EXEC = 0x4;
+    private static final int MAP_PRIVATE = 0x2;
+    private static final int MAP_ANONYMOUS = mapAnonymousFlag();
 
     private HotSpotMethodBridge() {
     }
@@ -67,6 +90,28 @@ public final class HotSpotMethodBridge {
         return new Link(targetMethod, carrierMethod, carrierCode, carrierCompiledEntry, carrierInterpretedEntry);
     }
 
+    public static RawCodeLink linkToMachineCode(Method target, byte[] code) {
+        if (code.length == 0) {
+            throw new IllegalArgumentException("code is empty");
+        }
+        long targetMethod = methodAddress(target);
+        if (getAddress(targetMethod + N_METHOD_LAYOUT.methodCodeOffset) != 0) {
+            throw new IllegalStateException("target already has nmethod");
+        }
+
+        RawCode rawCode = Hidden.installCodeBlob(code);
+        long i2cEntry = Hidden.i2cEntry(targetMethod);
+        suppressTargetCompilation(targetMethod);
+
+        putAddress(targetMethod + N_METHOD_LAYOUT.methodCodeOffset, 0);
+        VarHandle.storeStoreFence();
+        putAddress(targetMethod + N_METHOD_LAYOUT.methodCompiledEntryOffset, rawCode.entry);
+        VarHandle.storeStoreFence();
+        putAddress(targetMethod + N_METHOD_LAYOUT.methodInterpretedEntryOffset, i2cEntry);
+
+        return new RawCodeLink(targetMethod, rawCode.blob, rawCode.entry, rawCode.size, i2cEntry);
+    }
+
     private static void suppressTargetCompilation(long targetMethod) {
         long flagsAddress = targetMethod + N_METHOD_LAYOUT.methodFlagsOffset;
         // 禁止编译和inline防止替换之后被jvm修改
@@ -80,6 +125,12 @@ public final class HotSpotMethodBridge {
                 && getAddress(link.carrierMethod + N_METHOD_LAYOUT.methodCodeOffset) == link.code
                 && getAddress(link.carrierMethod + N_METHOD_LAYOUT.methodCompiledEntryOffset) == link.compiledEntry
                 && getAddress(link.carrierMethod + N_METHOD_LAYOUT.methodInterpretedEntryOffset) == link.interpretedEntry;
+    }
+
+    public static boolean isCurrent(RawCodeLink link) {
+        return getAddress(link.targetMethod + N_METHOD_LAYOUT.methodCodeOffset) == 0
+                && getAddress(link.targetMethod + N_METHOD_LAYOUT.methodCompiledEntryOffset) == link.entry
+                && getAddress(link.targetMethod + N_METHOD_LAYOUT.methodInterpretedEntryOffset) == link.interpretedEntry;
     }
 
     public static boolean compileNow(Method method, int level) {
@@ -114,6 +165,14 @@ public final class HotSpotMethodBridge {
         return NativeBridge.methodAddress(method);
     }
 
+    static long decodeObjectReference(long value, int referenceSize) {
+        return switch (referenceSize) {
+            case Integer.BYTES -> NARROW_OOP_ENCODING.decode(value);
+            case Long.BYTES -> value;
+            default -> throw new IllegalArgumentException("unsupported reference size: " + referenceSize);
+        };
+    }
+
     private static MemorySegment memory(long address, long byteSize) {
         return MemorySegment.ofAddress(address).reinterpret(byteSize);
     }
@@ -144,6 +203,12 @@ public final class HotSpotMethodBridge {
     public record Link(long targetMethod, long carrierMethod, long code, long compiledEntry, long interpretedEntry) {
     }
 
+    public record RawCodeLink(long targetMethod, long blob, long entry, int size, long interpretedEntry) {
+    }
+
+    private record RawCode(long blob, long entry, int size) {
+    }
+
     private record NMethodLayout(
             long methodFlagsOffset,
             long methodInterpreterEntryOffset,
@@ -163,6 +228,26 @@ public final class HotSpotMethodBridge {
         }
     }
 
+    private record CodeBlobLayout(long codeOffset) {
+        private static CodeBlobLayout load() {
+            VmStructs vm = new VmStructs();
+            return new CodeBlobLayout(vm.offset("CodeBlob", "_code_offset"));
+        }
+    }
+
+    private record NarrowOopEncoding(long base, int shift) {
+        private static NarrowOopEncoding load() {
+            VmStructs vm = new VmStructs();
+            return new NarrowOopEncoding(
+                    getAddress(vm.staticAddress("CompressedOops", "_base")),
+                    getInt(vm.staticAddress("CompressedOops", "_shift")));
+        }
+
+        private long decode(long value) {
+            return value == 0 ? 0 : base + (value << shift);
+        }
+    }
+
     private static final class VmStructs {
         private static final SymbolLookup JVM = SymbolLookup.libraryLookup(libjvm(), Arena.global());
 
@@ -171,6 +256,7 @@ public final class HotSpotMethodBridge {
         private final long fieldNameOffset;
         private final long isStaticOffset;
         private final long offsetOffset;
+        private final long addressOffset;
         private final long stride;
 
         private VmStructs() {
@@ -179,15 +265,21 @@ public final class HotSpotMethodBridge {
             fieldNameOffset = getLong(symbol("gHotSpotVMStructEntryFieldNameOffset"));
             isStaticOffset = getLong(symbol("gHotSpotVMStructEntryIsStaticOffset"));
             offsetOffset = getLong(symbol("gHotSpotVMStructEntryOffsetOffset"));
+            addressOffset = getLong(symbol("gHotSpotVMStructEntryAddressOffset"));
             stride = getLong(symbol("gHotSpotVMStructEntryArrayStride"));
         }
 
         long offset(String typeName, String fieldName) {
-            long entry = find(typeName, fieldName);
+            long entry = find(typeName, fieldName, false);
             return getLong(entry + offsetOffset);
         }
 
-        private long find(String typeName, String fieldName) {
+        long staticAddress(String typeName, String fieldName) {
+            long entry = find(typeName, fieldName, true);
+            return getAddress(entry + addressOffset);
+        }
+
+        private long find(String typeName, String fieldName, boolean isStatic) {
             //VMStructEntry 本质上是 HotSpot 给“外部观察者”导出的 C++ 字段元数据表。每条记录描述一个 VM 内部字段
             for (long entry = entries; ; entry += stride) {
                 long typePtr = getAddress(entry + typeNameOffset);
@@ -195,7 +287,7 @@ public final class HotSpotMethodBridge {
                 if (typePtr == 0 || fieldPtr == 0) {
                     break;
                 }
-                if (getInt(entry + isStaticOffset) == 0
+                if ((getInt(entry + isStaticOffset) != 0) == isStatic
                         && typeName.equals(cString(typePtr))
                         && fieldName.equals(cString(fieldPtr))) {
                     return entry;
@@ -387,7 +479,6 @@ public final class HotSpotMethodBridge {
     }
 
     private static final class Hidden {
-        private static final SymbolLookup JVM = SymbolLookup.libraryLookup(VmStructs.libjvm(), Arena.global());
         private static final int INVOCATION_ENTRY_BCI = -1;
 
         //todo 尽可能不要依赖于cpp符号 后面看看怎么搞
@@ -397,6 +488,9 @@ public final class HotSpotMethodBridge {
         private static final MethodHandle WHITEBOX_COMPILE_METHOD = LINKER.downcallHandle(
                 MemorySegment.ofAddress(NATIVE_SYMBOLS.whiteBoxCompileMethod()),
                 FunctionDescriptor.of(ValueLayout.JAVA_BOOLEAN, ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS));
+        private static final MethodHandle METHOD_GET_I2C_ENTRY = LINKER.downcallHandle(
+                MemorySegment.ofAddress(NATIVE_SYMBOLS.methodGetI2cEntry()),
+                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
 
         private static boolean compile(long method, int level) {
             try {
@@ -409,6 +503,304 @@ public final class HotSpotMethodBridge {
             } catch (Throwable e) {
                 throw new RuntimeException(e);
             }
+        }
+
+        private static long i2cEntry(long method) {
+            try {
+                MemorySegment entry = (MemorySegment) METHOD_GET_I2C_ENTRY.invokeExact(MemorySegment.ofAddress(method));
+                return entry.address();
+            } catch (Throwable e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        private static RawCode installCodeBlob(byte[] code) {
+            return NATIVE_SYMBOLS.installCodeBlob(code);
+        }
+    }
+
+    private static MemorySegment executableMemory(byte[] code) throws Throwable {
+        MemorySegment memory = (MemorySegment) MMAP.invokeExact(
+                MemorySegment.NULL,
+                (long) code.length,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0L);
+        if (memory.address() == MAP_FAILED) {
+            throw new OutOfMemoryError("mmap executable memory allocation failed");
+        }
+
+        memory(memory.address(), code.length).copyFrom(MemorySegment.ofArray(code));
+        int res = (int) MPROTECT.invokeExact(memory, (long) code.length, PROT_READ | PROT_EXEC);
+        if (res != 0) {
+            throw new IllegalStateException("mprotect(PROT_READ | PROT_EXEC) failed: " + res);
+        }
+        return memory;
+    }
+
+    private static int mapAnonymousFlag() {
+        String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+        if (os.contains("mac") || os.contains("darwin")) {
+            return 0x1000;
+        }
+        if (os.contains("linux")) {
+            return 0x20;
+        }
+        throw new UnsupportedOperationException("unsupported OS: " + os);
+    }
+
+    // 这个安装 trampoline 只给 macOS/aarch64 用：切 WXWrite，写 CodeCache，再切回 WXExec。
+    private static final class MachOAArch64CodeBlobInstaller {
+        private static final MemorySegment RAW_CODE_BLOB_NAME = Arena.global().allocateFrom("hotspot-method-bridge raw code");
+        private static final MethodHandle HANDLE = installHandle();
+        private static final int X0 = 0;
+        private static final int X1 = 1;
+        private static final int X2 = 2;
+        private static final int X3 = 3;
+        private static final int X4 = 4;
+        private static final int X5 = 5;
+        private static final int X6 = 6;
+        private static final int X8 = 8;
+        private static final int X16 = 16;
+        private static final int X30 = 30;
+        private static final int SP = 31;
+        private static final int STACK_SIZE = 96;
+        private static final int NAME_SLOT = 0;
+        private static final int LENGTH_SLOT = 8;
+        private static final int SOURCE_SLOT = 16;
+        private static final int CODE_OFFSET_SLOT = 24;
+        private static final int CREATE_SLOT = 32;
+        private static final int WX_SLOT = 40;
+        private static final int ENTRY_SLOT = 48;
+        private static final int LR_SLOT = 88;
+
+        private final ArrayList<Integer> code = new ArrayList<>();
+        private final HashMap<String, Integer> labels = new HashMap<>();
+        private final ArrayList<Patch> patches = new ArrayList<>();
+
+        public RawCode install(byte[] code, long bufferBlobCreate, long currentThreadEnableWx) {
+            try (Arena arena = Arena.ofConfined()) {
+                // 业务机器码放进 HotSpot CodeCache；mmap 只承载安装用 trampoline。
+                MemorySegment source = arena.allocate(code.length, Byte.BYTES);
+                source.copyFrom(MemorySegment.ofArray(code));
+                MemorySegment entry = (MemorySegment) HANDLE.invokeExact(
+                        RAW_CODE_BLOB_NAME,
+                        (long) code.length,
+                        source,
+                        CODE_BLOB_LAYOUT.codeOffset,
+                        MemorySegment.ofAddress(bufferBlobCreate),
+                        MemorySegment.ofAddress(currentThreadEnableWx));
+                if (entry.address() == 0) {
+                    throw new OutOfMemoryError("BufferBlob::create failed");
+                }
+                return new RawCode(entry.address() - CODE_BLOB_LAYOUT.codeOffset, entry.address(), code.length);
+            } catch (Throwable e) {
+                if (e instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (e instanceof Error error) {
+                    throw error;
+                }
+                throw new RuntimeException(e);
+            }
+        }
+
+        private static MethodHandle installHandle() {
+            try {
+                MemorySegment stub = executableMemory(generate());
+                return LINKER.downcallHandle(
+                        stub,
+                        FunctionDescriptor.of(
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_LONG,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.JAVA_LONG,
+                                ValueLayout.ADDRESS,
+                                ValueLayout.ADDRESS));
+            } catch (Throwable e) {
+                if (e instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (e instanceof Error error) {
+                    throw error;
+                }
+                throw new RuntimeException(e);
+            }
+        }
+
+        private static byte[] generate() {
+            String arch = System.getProperty("os.arch").toLowerCase(Locale.ROOT);
+            if (!arch.equals("aarch64") && !arch.equals("arm64")) {
+                throw new UnsupportedOperationException("raw machine code install only supports aarch64/arm64 now: " + arch);
+            }
+            MachOAArch64CodeBlobInstaller e = new MachOAArch64CodeBlobInstaller();
+            e.emit();
+            return e.bytes();
+        }
+
+        private void emit() {
+            subSp(STACK_SIZE);
+            str(X30, SP, LR_SLOT);
+            str(X0, SP, NAME_SLOT);
+            str(X1, SP, LENGTH_SLOT);
+            str(X2, SP, SOURCE_SLOT);
+            str(X3, SP, CODE_OFFSET_SLOT);
+            str(X4, SP, CREATE_SLOT);
+            str(X5, SP, WX_SLOT);
+
+            movW(X0, 0);
+            blr(X5);
+
+            ldr(X0, SP, NAME_SLOT);
+            ldr(X1, SP, LENGTH_SLOT);
+            ldr(X16, SP, CREATE_SLOT);
+            blr(X16);
+
+            ldr(X3, SP, CODE_OFFSET_SLOT);
+            addReg(X4, X0, X3);
+            str(X4, SP, ENTRY_SLOT);
+            ldr(X5, SP, SOURCE_SLOT);
+            ldr(X6, SP, LENGTH_SLOT);
+
+            label("copy_loop");
+            cbz(X6, "copy_done");
+            ldrbPost(X8, X5, 1);
+            strbPost(X8, X4, 1);
+            subsImm(X6, X6, 1);
+            bCond(1, "copy_loop");
+            label("copy_done");
+
+            ldr(X0, SP, ENTRY_SLOT);
+            ldr(X1, SP, LENGTH_SLOT);
+            flushICache();
+
+            ldr(X5, SP, WX_SLOT);
+            movW(X0, 1);
+            blr(X5);
+
+            ldr(X0, SP, ENTRY_SLOT);
+            ldr(X30, SP, LR_SLOT);
+            addSp(STACK_SIZE);
+            word(0xd65f03c0); // ret
+        }
+
+        private void flushICache() {
+            // macOS 用户态不能稳定读取 CTR_EL0；这里按 AArch64 常见 64B cache line 过量 flush。
+            movZ(X3, 64);
+            subImm(X4, X3, 1);
+            word(0x8a240004); // bic x4, x0, x4
+            addReg(X5, X0, X1);
+
+            label("dc_loop");
+            word(0xd50b7b24); // dc cvau, x4
+            addReg(X4, X4, X3);
+            cmpReg(X4, X5);
+            bCond(3, "dc_loop");
+
+            word(0xd5033b9f); // dsb ish
+            subImm(X4, X3, 1);
+            word(0x8a240004); // bic x4, x0, x4
+
+            label("ic_loop");
+            word(0xd50b7524); // ic ivau, x4
+            addReg(X4, X4, X3);
+            cmpReg(X4, X5);
+            bCond(3, "ic_loop");
+            word(0xd5033b9f); // dsb ish
+            word(0xd5033fdf); // isb
+        }
+
+        private byte[] bytes() {
+            for (Patch patch : patches) {
+                int target = labels.get(patch.label);
+                int delta = target - patch.index;
+                code.set(patch.index, patch.opcode | ((delta & 0x7ffff) << 5));
+            }
+            byte[] bytes = new byte[code.size() * Integer.BYTES];
+            MemorySegment out = MemorySegment.ofArray(bytes);
+            ValueLayout.OfInt intLayout = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+            for (int i = 0; i < code.size(); i++) {
+                out.set(intLayout, (long) i * Integer.BYTES, code.get(i));
+            }
+            return bytes;
+        }
+
+        private void label(String label) {
+            labels.put(label, code.size());
+        }
+
+        private void word(int value) {
+            code.add(value);
+        }
+
+        private void cbz(int rt, String label) {
+            patch(0xb4000000 | rt, label);
+        }
+
+        private void bCond(int cond, String label) {
+            patch(0x54000000 | cond, label);
+        }
+
+        private void patch(int opcode, String label) {
+            patches.add(new Patch(code.size(), opcode, label));
+            word(opcode);
+        }
+
+        private void subSp(int bytes) {
+            word(0xd10003ff | (bytes << 10));
+        }
+
+        private void addSp(int bytes) {
+            word(0x910003ff | (bytes << 10));
+        }
+
+        private void str(int rt, int rn, int offset) {
+            word(0xf9000000 | ((offset / Long.BYTES) << 10) | (rn << 5) | rt);
+        }
+
+        private void ldr(int rt, int rn, int offset) {
+            word(0xf9400000 | ((offset / Long.BYTES) << 10) | (rn << 5) | rt);
+        }
+
+        private void ldrbPost(int rt, int rn, int offset) {
+            word(0x38400400 | ((offset & 0x1ff) << 12) | (rn << 5) | rt);
+        }
+
+        private void strbPost(int rt, int rn, int offset) {
+            word(0x38000400 | ((offset & 0x1ff) << 12) | (rn << 5) | rt);
+        }
+
+        private void movW(int rd, int value) {
+            word(0x52800000 | (value << 5) | rd);
+        }
+
+        private void movZ(int rd, int value) {
+            word(0xd2800000 | (value << 5) | rd);
+        }
+
+        private void blr(int rn) {
+            word(0xd63f0000 | (rn << 5));
+        }
+
+        private void addReg(int rd, int rn, int rm) {
+            word(0x8b000000 | (rm << 16) | (rn << 5) | rd);
+        }
+
+        private void subImm(int rd, int rn, int imm) {
+            word(0xd1000000 | (imm << 10) | (rn << 5) | rd);
+        }
+
+        private void subsImm(int rd, int rn, int imm) {
+            word(0xf1000000 | (imm << 10) | (rn << 5) | rd);
+        }
+
+        private void cmpReg(int rn, int rm) {
+            word(0xeb00001f | (rm << 16) | (rn << 5));
+        }
+
+        private record Patch(int index, int opcode, String label) {
         }
     }
 
@@ -446,6 +838,10 @@ public final class HotSpotMethodBridge {
 
         long whiteBoxCompileMethod();
 
+        long methodGetI2cEntry();
+
+        RawCode installCodeBlob(byte[] code);
+
         static NativeSymbols current() {
             String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
             if (os.contains("mac") || os.contains("darwin")) {
@@ -478,6 +874,28 @@ public final class HotSpotMethodBridge {
         @Override
         public long whiteBoxCompileMethod() {
             return symbol("_ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread");
+        }
+
+        @Override
+        public long methodGetI2cEntry() {
+            return symbol("_ZN6Method13get_i2c_entryEv");
+        }
+
+        private long bufferBlobCreate() {
+            return symbol("_ZN10BufferBlob6createEPKcj");
+        }
+
+        private long currentThreadEnableWx() {
+            return symbol("_ZN2os24current_thread_enable_wxE6WXMode");
+        }
+
+        @Override
+        public RawCode installCodeBlob(byte[] code) {
+            return InstallerHolder.CODE_BLOB_INSTALLER.install(code, bufferBlobCreate(), currentThreadEnableWx());
+        }
+
+        private static final class InstallerHolder {
+            private static final MachOAArch64CodeBlobInstaller CODE_BLOB_INSTALLER = new MachOAArch64CodeBlobInstaller();
         }
 
         private long symbol(String name) {
@@ -531,6 +949,8 @@ public final class HotSpotMethodBridge {
     private static final class Elf implements NativeSymbols {
         private static final int SHT_SYMTAB = 2;
         private static final int SHT_DYNSYM = 11;
+        private static final MemorySegment RAW_CODE_BLOB_NAME = Arena.global().allocateFrom("hotspot-method-bridge raw code");
+        private static final MethodHandle CODE_CACHE_BLOB_CREATE_MH = LINKER.downcallHandle(FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT));
 
         private final byte[] bytes;
         private final MemorySegment file;
@@ -582,6 +1002,56 @@ public final class HotSpotMethodBridge {
         @Override
         public long whiteBoxCompileMethod() {
             return symbol("_ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread");
+        }
+
+        @Override
+        public long methodGetI2cEntry() {
+            return symbol("_ZN6Method13get_i2c_entryEv");
+        }
+
+        private long bufferBlobCreate() {
+            return symbol("_ZN10BufferBlob6createEPKcj");
+        }
+
+        @Override
+        public RawCode installCodeBlob(byte[] code) {
+            try {
+                MemorySegment blob = (MemorySegment) CODE_CACHE_BLOB_CREATE_MH.invokeExact(
+                        MemorySegment.ofAddress(bufferBlobCreate()),
+                        RAW_CODE_BLOB_NAME,
+                        code.length);
+                if (blob.address() == 0) {
+                    throw new OutOfMemoryError("BufferBlob::create failed");
+                }
+                long entry = blob.address() + CODE_BLOB_LAYOUT.codeOffset;
+                memory(entry, code.length).copyFrom(MemorySegment.ofArray(code));
+                LinuxClearCache.clearCache(entry, code.length);
+                return new RawCode(blob.address(), entry, code.length);
+            } catch (Throwable e) {
+                if (e instanceof RuntimeException runtimeException) {
+                    throw runtimeException;
+                }
+                if (e instanceof Error error) {
+                    throw error;
+                }
+                throw new RuntimeException(e);
+            }
+        }
+
+        private static final class LinuxClearCache {
+            private static final MethodHandle HANDLE = handle();
+
+            private static void clearCache(long start, int size) throws Throwable {
+                HANDLE.invokeExact(MemorySegment.ofAddress(start), MemorySegment.ofAddress(start + size));
+            }
+
+            private static MethodHandle handle() {
+                return LINKER.downcallHandle(
+                        SymbolLookup.libraryLookup("libgcc_s.so.1", Arena.global())
+                                .find("__clear_cache")
+                                .orElseThrow(() -> new IllegalStateException("libgcc_s __clear_cache not found")),
+                        FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+            }
         }
 
         private long symbol(String name) {
@@ -644,6 +1114,16 @@ public final class HotSpotMethodBridge {
 
         @Override
         public long whiteBoxCompileMethod() {
+            throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+        }
+
+        @Override
+        public long methodGetI2cEntry() {
+            throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+        }
+
+        @Override
+        public RawCode installCodeBlob(byte[] code) {
             throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
         }
     }

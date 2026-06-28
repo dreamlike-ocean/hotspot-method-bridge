@@ -1,6 +1,6 @@
 # hotspot-method-bridge
 
-JDK 25 HotSpot-family `Method* -> nmethod` link PoC。
+JDK 25 HotSpot-family `Method* -> nmethod / CodeCache entry` link PoC。
 
 这里的 HotSpot 指 VM runtime 家族：OpenJDK/Oracle/Corretto/GraalVM JDK 这类仍然使用 HotSpot `libjvm` 的 JDK；不包括 OpenJ9，也不包括 GraalVM Native Image 产物。
 
@@ -11,6 +11,7 @@ JDK 25 HotSpot-family `Method* -> nmethod` link PoC。
 3. 不使用 WhiteBox Java API，也不使用 JVMCI。
 4. 不使用 `Unsafe`。
 5. 用 FFM 读取当前进程 `libjvm`，把 target 链接到同签名 carrier 的合法 `nmethod`。
+6. aarch64 上可以把一段 raw `byte[]` 机器码安装进 HotSpot `CodeCache`，再让 target 跳到这段入口。
 
 ## 运行
 
@@ -32,7 +33,7 @@ JAVA_HOME=/path/to/jdk-25 ./run.sh
 
 成功时 `./run.sh` 以 exit code 0 结束；脚本内部使用 `mvn -q test`，正常情况下不会打印 Maven 成功横幅。
 
-JUnit 断言覆盖：link 前没有业务 warmup；解释器调用 `target` 后只增加 `carrierCount`；已编译 caller 循环调用后仍只增加 `carrierCount`。
+JUnit 断言覆盖：link 前没有业务 warmup；解释器调用 `target` 后只增加 `carrierCount`；已编译 caller 循环调用后仍只增加 `carrierCount`；aarch64 raw 机器码进入 `CodeCache` 后能返回入参 `Object` 的 oop 地址。
 
 ## 实现
 
@@ -66,6 +67,14 @@ target._from_interpreted_entry = carrier._from_interpreted_entry
 ```
 
 所有 native 地址读写都走 FFM `MemorySegment`，没有 `Unsafe`、slot 扫描或 oop 地址解码。
+
+raw `byte[]` 机器码路径：
+
+1. 调 HotSpot `BufferBlob::create(const char*, uint)` 分配一块 `BufferBlob`。
+2. 通过 `gHotSpotVMStructs` 读取 `CodeBlob::_code_offset`，`entry = blob + _code_offset`。
+3. macOS/aarch64 不能在 FFM downcall stub 里直接切 `WXWrite`，所以 `MachO.installCodeBlob` 进入普通 `mmap + mprotect(RX)` trampoline；trampoline 内部切 `WXWrite`、调用 `BufferBlob::create`、拷贝机器码、flush icache、切回 `WXExec`，最后才返回 Java/FFM。
+4. Linux/aarch64 不需要 W^X 切换，`Elf.installCodeBlob` 直接 FFM 调 `BufferBlob::create`，用 `MemorySegment.copyFrom` 写入 CodeCache，然后调 `libgcc_s.__clear_cache`。
+5. raw 路径不写 `target._code`，因为 `BufferBlob` 不是 `nmethod`；只写 `target._from_compiled_entry = entry` 和 `target._from_interpreted_entry = target.get_i2c_entry()`。
 
 ## JDK 25 源码对应
 
@@ -185,6 +194,87 @@ target._from_interpreted_entry = carrier._from_interpreted_entry
 
 解释器普通调用也读 `_from_interpreted_entry`，例如 [`javaCalls.cpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/runtime/javaCalls.cpp#L384-L392) 和模板解释器的 [`jump_from_interpreted`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/cpu/aarch64/interp_masm_aarch64.cpp#L359-L377)。只有 JVMTI interpreter-only / single-step 这类路径会退回 `_i2i_entry`。本 PoC 的目标是让普通 interpreted/compiled 调用进入 carrier 的 compiled code，不覆盖 target 自己的纯解释器入口。
 
+### Raw 机器码和 CodeCache
+
+[`src/hotspot/share/code/codeBlob.hpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/code/codeBlob.hpp#L119-L124)：
+
+```cpp
+int _content_offset;
+int _code_offset;
+int _data_offset;
+```
+
+[`CodeBlob::code_begin`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/code/codeBlob.hpp#L240-L245)：
+
+```cpp
+address header_begin() const { return (address) this; }
+address code_begin() const   { return (address) header_begin() + _code_offset; }
+```
+
+[`VMStructs` 导出 `CodeBlob::_code_offset`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/runtime/vmStructs.cpp#L489-L498)，所以 Java 侧不硬编码 `CodeBlob` 头大小，而是查：
+
+```text
+entry = BufferBlob* + offset(CodeBlob::_code_offset)
+```
+
+[`BufferBlob::create`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/code/codeBlob.cpp#L402-L418) 会在 HotSpot `CodeCache` 里分配 `BufferBlob`：
+
+```cpp
+BufferBlob* BufferBlob::create(const char* name, uint buffer_size) {
+  ThreadInVMfromUnknown __tiv;
+  ...
+  blob = new (size) BufferBlob(name, CodeBlobKind::Buffer, size);
+  ...
+  return blob;
+}
+```
+
+raw `byte[]` 链接时不能把 `BufferBlob*` 写进 `Method::_code`。`_code` 的类型是 `nmethod* volatile`，HotSpot 的 deopt、class unloading、`method->code()` 路径会按 `nmethod` 语义解释它。这里的 raw code 只是一个 `BufferBlob` 里的 entry，所以只写：
+
+```text
+target._code = nullptr
+target._from_compiled_entry = blob->code_begin()
+target._from_interpreted_entry = target.get_i2c_entry()
+```
+
+解释器进入 target 时先走 i2c adapter。以 aarch64 为例，[`gen_i2c_adapter`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/cpu/aarch64/sharedRuntime_aarch64.cpp#L562-L657) 会把解释器栈参数搬到 compiled Java ABI 寄存器，最后跳到 `Method::_from_compiled_entry`。因此 raw entry 需要遵守 HotSpot compiled Java ABI，不是 JNI ABI。
+
+macOS/aarch64 的 W^X 定义在 [`os.hpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/runtime/os.hpp#L143-L146)：
+
+```cpp
+enum WXMode {
+  WXWrite = 0,
+  WXExec = 1,
+};
+```
+
+[`os::current_thread_enable_wx`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/os_cpu/bsd_aarch64/os_bsd_aarch64.cpp#L516-L525) 本质上切当前线程对 `MAP_JIT` 区域的写/执行权限：
+
+```cpp
+void os::current_thread_enable_wx(WXMode mode) {
+  bool exec_enabled = mode != WXWrite;
+  if (exec_enabled != _jit_exec_enabled) {
+    pthread_jit_write_protect_np(exec_enabled);
+    _jit_exec_enabled = exec_enabled;
+  }
+}
+```
+
+所以 macOS raw 安装必须在普通 RX trampoline 中一次性完成：
+
+```text
+FFM downcall stub(CodeCache, WXExec)
+  -> trampoline(普通 mmap RX)
+     -> WXWrite
+     -> BufferBlob::create + copy byte[] + flush icache
+     -> WXExec
+  -> return FFM downcall stub(CodeCache, WXExec)
+```
+
+如果在 FFM stub 里切到 `WXWrite` 后直接返回 Java，当前线程会立刻尝试执行 CodeCache 里的 FFM stub，结果就是 crash。
+
+icache flush 不依赖 HotSpot C++ inline 符号。HotSpot 自己在 macOS/aarch64 上用 [`__clear_cache`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/os_cpu/bsd_aarch64/icache_bsd_aarch64.hpp#L40-L42)，Linux/aarch64 常规路径也走 [`__builtin___clear_cache`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/os_cpu/linux_aarch64/icache_linux_aarch64.hpp#L44-L60)。本项目在 Mach-O trampoline 内直接执行 `dc cvau / ic ivau / dsb / isb`，并固定按 64B cache line 过量 flush，避免 macOS 用户态读取 `CTR_EL0` 触发 `SIGILL`；ELF 路径不走 trampoline，直接 FFM 调 `libgcc_s.__clear_cache`。
+
 ### 强制编译入口
 
 [`src/hotspot/share/prims/whitebox.hpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/prims/whitebox.hpp#L70)：
@@ -234,14 +324,29 @@ methodFlagsOffset = offset(Method::_intrinsic_id) - sizeof(MethodFlags::_status)
 
 `Method::_code` 不是稳定绑定。它是 HotSpot tiered compilation/deopt 的当前入口缓存：carrier 从 C1 换到 C2、被 `make_not_entrant`、或被 deopt 时，只会更新 carrier 自己的 `Method`，不会自动同步已经手工写过的 target。`HotSpotMethodBridge.isCurrent(link)` 只做快照校验；变成 `false` 后需要重新 link，不能继续调用旧 target。
 
+运行期修改 `MethodFlags` 只能影响之后的编译/内联判断，不会撤销已经存在的 target nmethod、已经 inline target 的 caller，也不能取消已经排队或正在执行的编译任务。所以 target 最好在暴露给业务调用前 link，并在调用前用 `isCurrent(link)` 做快照校验。
+
 当前 `compileNow` 验证了 macOS arm64 + Corretto 25、GraalVM JDK 25，以及 OrbStack Linux aarch64 + Corretto 25.0.1。它依赖 HotSpot-family `libjvm` 保留这些 local C++ symbol：
 
 ```text
 _ZN6Method26checked_resolve_jmethod_idEP10_jmethodID
 _ZN6Thread7currentEv
 _ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread
+_ZN6Method13get_i2c_entryEv
+_ZN10BufferBlob6createEPKcj
+```
+
+macOS/aarch64 raw `byte[]` 路径还需要：
+
+```text
+_ZN2os24current_thread_enable_wxE6WXMode
 ```
 
 Mach-O 文件符号表会在上述 Itanium ABI 名字前再多一个 `_`；ELF 直接使用上述名字。Windows 动态库格式是 PE/COFF，当前实现只在选到 Windows 时抛出未实现异常。
 
 这些不是稳定 exported symbol。其他发行版、Linux stripped build 都不能假定可用。
+
+raw `byte[]` 路径还有两个边界：
+
+- macOS/aarch64 trampoline 直接调用 `os::current_thread_enable_wx`，它更新 HotSpot 的 per-thread JIT W^X TLS，但不是完整 `ThreadWXEnable` RAII；切换窗口必须保持极短，且不能在 `WXWrite` 中返回 Java/FFM。
+- Linux/aarch64 当前直接调 `libgcc_s.__clear_cache`，没有复刻 HotSpot `NeoverseN1ICacheErratumMitigation` 分支；需要覆盖该 CPU erratum 时要改 ELF 的 clear-cache 策略或改为调 HotSpot 自己的路径。

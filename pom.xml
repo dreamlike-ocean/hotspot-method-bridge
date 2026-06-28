@@ -31,7 +31,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.5</version>
                 <configuration>
-                    <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+                    <argLine>--enable-native-access=ALL-UNNAMED -XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC</argLine>
                 </configuration>
             </plugin>
         </plugins>
