@@ -9,7 +9,7 @@ public final class VmStructs {
     private final long addressOffset;
     private final long stride;
 
-    public VmStructs() {
+    private VmStructs() {
         entries = HotSpotMemory.getAddress(symbol("gHotSpotVMStructs"));
         typeNameOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryTypeNameOffset"));
         fieldNameOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryFieldNameOffset"));
@@ -17,6 +17,10 @@ public final class VmStructs {
         offsetOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryOffsetOffset"));
         addressOffset = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryAddressOffset"));
         stride = HotSpotMemory.getLong(symbol("gHotSpotVMStructEntryArrayStride"));
+    }
+
+    public static VmStructs current() {
+        return Holder.INSTANCE;
     }
 
     public long offset(String typeName, String fieldName) {
@@ -50,11 +54,7 @@ public final class VmStructs {
         return HotSpotLibrary.runtimeAddress(name);
     }
 
-    public static String libjvm() {
-        return HotSpotLibrary.libjvm();
-    }
-
-    public static long runtimeAddress(String name) {
-        return HotSpotLibrary.runtimeAddress(name);
+    private static final class Holder {
+        private static final VmStructs INSTANCE = new VmStructs();
     }
 }

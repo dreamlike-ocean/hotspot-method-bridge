@@ -2,7 +2,11 @@ package io.github.dreamlike.hotspot.vmstruct;
 
 public record NarrowOopEncoding(long base, int shift) {
     public static NarrowOopEncoding load() {
-        VmStructs vm = new VmStructs();
+        return Holder.INSTANCE;
+    }
+
+    private static NarrowOopEncoding create() {
+        VmStructs vm = VmStructs.current();
         return new NarrowOopEncoding(
                 HotSpotMemory.getAddress(vm.staticAddress("CompressedOops", "_base")),
                 HotSpotMemory.getInt(vm.staticAddress("CompressedOops", "_shift")));
@@ -18,5 +22,9 @@ public record NarrowOopEncoding(long base, int shift) {
             case Long.BYTES -> value;
             default -> throw new IllegalArgumentException("unsupported reference size: " + referenceSize);
         };
+    }
+
+    private static final class Holder {
+        private static final NarrowOopEncoding INSTANCE = create();
     }
 }

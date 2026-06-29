@@ -41,14 +41,8 @@ public final class HotSpotMemory {
     }
 
     public static String cString(long address) {
-        int length = 0;
-        while (getByte(address + length) != 0) {
-            length++;
-        }
-        byte[] bytes = new byte[length];
-        for (int i = 0; i < length; i++) {
-            bytes[i] = getByte(address + i);
-        }
-        return new String(bytes, US_ASCII);
+        return MemorySegment.ofAddress(address)
+                .reinterpret(Long.MAX_VALUE)
+                .getString(0, US_ASCII);
     }
 }
