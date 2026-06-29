@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-JAVA_HOME="${JAVA_HOME:-/Users/dreamlike/.sdkman/candidates/java/25-amzn}"
+DEFAULT_JAVA_HOME="${HOME}/.sdkman/candidates/java/current"
+JAVA_HOME="${JAVA_HOME:-$DEFAULT_JAVA_HOME}"
 MVN="${MVN:-mvn}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 

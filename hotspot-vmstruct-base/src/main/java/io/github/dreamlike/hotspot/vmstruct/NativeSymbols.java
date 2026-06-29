@@ -1,0 +1,13 @@
+package io.github.dreamlike.hotspot.vmstruct;
+
+public sealed interface NativeSymbols permits MachO, Elf, PeCoff {
+    long checkedResolveJmethodId();
+
+    long threadCurrent();
+
+    long whiteBoxCompileMethod();
+
+    long methodGetI2cEntry();
+
+    NativeCode installCodeBlob(String name, byte[] code);
+}
