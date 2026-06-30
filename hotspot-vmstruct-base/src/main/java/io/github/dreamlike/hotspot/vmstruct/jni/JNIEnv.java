@@ -26,6 +26,7 @@ import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.GET_METHOD
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.GET_OBJECT_CLASS;
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.GET_STATIC_METHOD_ID;
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.GET_VERSION;
+import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.IS_SAME_OBJECT;
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.IS_VIRTUAL_THREAD;
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.NEW_BYTE_ARRAY;
 import static io.github.dreamlike.hotspot.vmstruct.jni.JNIEnvFunction.NEW_GLOBAL_REF;
@@ -69,6 +70,7 @@ public final class JNIEnv {
     private static final MethodHandle NEW_GLOBAL_REF_MH = downcall(FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS));
     private static final MethodHandle DELETE_GLOBAL_REF_MH = downcall(FunctionDescriptor.ofVoid(ADDRESS, ADDRESS));
     private static final MethodHandle DELETE_LOCAL_REF_MH = downcall(FunctionDescriptor.ofVoid(ADDRESS, ADDRESS));
+    private static final MethodHandle IS_SAME_OBJECT_MH = downcall(FunctionDescriptor.of(JAVA_BYTE, ADDRESS, ADDRESS, ADDRESS));
     private static final MethodHandle GET_OBJECT_CLASS_MH = downcall(FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS));
     private static final MethodHandle GET_METHOD_ID_MH = downcall(FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
     private static final MethodHandle CALL_OBJECT_METHOD_A_MH = downcall(FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
@@ -200,11 +202,19 @@ public final class JNIEnv {
     }
 
     public GlobalRef globalRef(MemorySegment object) {
-        return new GlobalRef(this, newGlobalRef(object));
+        MemorySegment global = newGlobalRef(object);
+        if (isNull(global)) {
+            throw new OutOfMemoryError("NewGlobalRef returned NULL");
+        }
+        return GlobalRef.wrap(global);
     }
 
     public GlobalRef wrapGlobalRef(MemorySegment globalRef) {
-        return new GlobalRef(this, globalRef);
+        return GlobalRef.wrap(globalRef);
+    }
+
+    public GlobalRef wrapGlobalRef(long globalRef) {
+        return GlobalRef.wrap(globalRef);
     }
 
     public void deleteGlobalRef(MemorySegment globalRef) {
@@ -221,6 +231,16 @@ public final class JNIEnv {
         }
         try {
             DELETE_LOCAL_REF_MH.invokeExact(function(DELETE_LOCAL_REF), pointer, localRef);
+        } catch (Throwable t) {
+            throw rethrow(t);
+        }
+    }
+
+    public boolean isSameObject(MemorySegment first, MemorySegment second) {
+        try {
+            byte result = (byte) IS_SAME_OBJECT_MH.invokeExact(function(IS_SAME_OBJECT), pointer, first, second);
+            checkException("IsSameObject");
+            return result != 0;
         } catch (Throwable t) {
             throw rethrow(t);
         }
