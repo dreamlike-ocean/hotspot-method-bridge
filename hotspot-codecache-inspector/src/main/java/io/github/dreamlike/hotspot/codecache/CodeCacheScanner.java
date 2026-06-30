@@ -1,6 +1,7 @@
 package io.github.dreamlike.hotspot.codecache;
 
 import io.github.dreamlike.hotspot.vmstruct.HotSpotMemory;
+import io.github.dreamlike.hotspot.vmstruct.HotSpotMethodMetadata;
 
 import java.util.ArrayList;
 
@@ -9,11 +10,11 @@ final class CodeCacheScanner {
     private static final int MAX_REASONABLE_CODE_BLOB_SIZE = 256 * 1024 * 1024;
 
     private final CodeCacheLayout layout;
-    private final HotSpotMetadataReader metadataReader;
+    private final HotSpotMethodMetadata metadataReader;
 
     private CodeCacheScanner() {
         layout = CodeCacheLayout.load();
-        metadataReader = HotSpotMetadataReader.load();
+        metadataReader = HotSpotMethodMetadata.load();
     }
 
     static CodeCacheScanner load() {

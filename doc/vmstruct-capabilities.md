@@ -34,7 +34,7 @@ JOL 的对象地址读取是诊断级做法：把对象放进 `Object[1]`，用 
 
 可以展示 Method 地址、方法名、签名、max stack、max locals、参数槽数、当前 nmethod、compiled/interpreted entry。也可以直接改 entry，把一个 Java 方法转接到 raw code、另一个 Method 的 compiled entry 或解释器入口。
 
-当前项目已经走通 `jmethodID -> Method*`、`WhiteBox::compile_method`、`BufferBlob::create` 和 Method entry 改写。`Method::_flags` 没有直接导出，但可以继续按 JDK 25 布局从 `_intrinsic_id` 前推，或者后续用更完整的 VMTypes/源码校验来集中管理。
+当前项目已经走通 `ClassLoaderDataGraph/InstanceKlass::_methods -> Method*`、`WhiteBox::compile_method`、`BufferBlob::create` 和 Method entry 改写。`Method::_flags` 没有直接导出，但可以继续按 JDK 25 布局从 `_intrinsic_id` 前推，或者后续用更完整的 VMTypes/源码校验来集中管理。
 
 ## 5. 字节码 patch
 

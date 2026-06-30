@@ -13,7 +13,7 @@
 - `VMStructEntry`：HotSpot 导给外部观察者的字段元数据表，用来查 `Method::_code` 等对象内偏移；看 `src/hotspot/share/runtime/vmStructs.hpp` 和 `src/hotspot/share/runtime/vmStructs.cpp`。
 - `Method`：Java 方法在 HotSpot 里的运行时元数据，本项目读写 `_code`、`_from_compiled_entry`、`_from_interpreted_entry`、`_i2i_entry`；看 `src/hotspot/share/oops/method.hpp` 和 `src/hotspot/share/oops/method.cpp`。
 - `MethodFlags`：`Method` 的运行期状态位，本项目设置 not-compilable 和 `dont_inline`；运行期 OR 不会撤销已有 nmethod、已 inline caller 或已排队编译任务；看 `src/hotspot/share/oops/methodFlags.hpp`。
-- `jmethodID` / `Method*`：通过 JNI `FromReflectedMethod` 拿 `jmethodID`，再用 `Method::checked_resolve_jmethod_id` 得到 `Method*`；看 `src/hotspot/share/prims/jni.cpp` 和 `src/hotspot/share/oops/method.cpp`。
+- `Method*`：通过 `ClassLoaderDataGraph::_head` 扫 `ClassLoaderData::_klasses`，按 holder/name/descriptor 在 `InstanceKlass::_methods` 中唯一匹配；同名类出现在多个 class loader 且方法签名相同时先抛歧义错误，不裸读 `OopHandle` slot；JNI `FromReflectedMethod -> jmethodID -> Method::checked_resolve_jmethod_id` 只作为源码对照；看 `src/hotspot/share/prims/jni.cpp`、`src/hotspot/share/oops/instanceKlass.cpp`、`src/hotspot/share/oops/method.cpp`。
 - `nmethod`：JIT 生成的 native code 对象，`Method::_code` 指向它；安装和失效行为主要看 `src/hotspot/share/oops/method.cpp`、`src/hotspot/share/ci/ciEnv.cpp`。
 - `CodeBlob`：HotSpot CodeCache 中所有代码块的公共头；raw `byte[]` 路径只需要 `CodeBlob::_code_offset`，用 `blob + _code_offset` 得到 `code_begin()`；看 `src/hotspot/share/code/codeBlob.hpp` 和 `src/hotspot/share/runtime/vmStructs.cpp`。
 - `BufferBlob`：CodeCache 中不带 `nmethod` 语义的普通代码块；raw 机器码放这里，不能把 `BufferBlob*` 写进 `Method::_code`；看 `src/hotspot/share/code/codeBlob.cpp`。

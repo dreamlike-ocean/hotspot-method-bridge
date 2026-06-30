@@ -2,11 +2,6 @@ package io.github.dreamlike.hotspot.vmstruct;
 
 public final class PeCoff implements NativeSymbols {
     @Override
-    public long checkedResolveJmethodId() {
-        throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
-    }
-
-    @Override
     public long threadCurrent() {
         throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
     }

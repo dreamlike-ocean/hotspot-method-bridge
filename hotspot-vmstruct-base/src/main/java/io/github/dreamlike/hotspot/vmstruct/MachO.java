@@ -38,11 +38,6 @@ public final class MachO implements NativeSymbols {
     private final long base = HotSpotLibrary.runtimeAddress("gHotSpotVMStructs") - fileSymbol("_gHotSpotVMStructs");
 
     @Override
-    public long checkedResolveJmethodId() {
-        return symbol("_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID");
-    }
-
-    @Override
     public long threadCurrent() {
         return symbol("_ZN6Thread7currentEv");
     }

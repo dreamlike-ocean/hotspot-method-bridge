@@ -53,11 +53,6 @@ public final class Elf implements NativeSymbols {
     }
 
     @Override
-    public long checkedResolveJmethodId() {
-        return symbol("_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID");
-    }
-
-    @Override
     public long threadCurrent() {
         return symbol("_ZN6Thread7currentEv");
     }

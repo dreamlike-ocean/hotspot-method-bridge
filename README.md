@@ -63,8 +63,8 @@ hotspot-method-bridge/src/test/java/io/github/dreamlike/hotspot/methodbridge/Hot
 关键步骤：
 
 1. 通过 `gHotSpotVMStructs` 找到 HotSpot 字段偏移；`VMStructEntry` 表项布局也从 HotSpot 导出的 `gHotSpotVMStructEntry*Offset` 和 `gHotSpotVMStructEntryArrayStride` 读取。
-2. 运行时用 JNI `Class.forName(name, false, Thread.currentThread().getContextClassLoader())` 找到已有的 `JniMethodAddressBridge`，并通过 `RegisterNatives` 把它的 `resolve(Method): long` 绑定到 FFM upcall。
-3. native upcall 里拿到 `Method` 的 `jobject`，调用 JNI `FromReflectedMethod` 得到 `jmethodID`，再调用 HotSpot `Method::checked_resolve_jmethod_id` 得到 `Method*`。
+2. 对 Java 反射 `Method` 使用 public API 构造 JVM descriptor，例如 `(Ljava/lang/Object;)I`。
+3. 通过 `ClassLoaderDataGraph::_head -> ClassLoaderData::_klasses -> Klass::_next_link` 扫描已加载类，按 `Klass::_name` 找 holder，再遍历 `InstanceKlass::_methods`，用 `Method::_constMethod -> ConstMethod::_constants/_name_index/_signature_index` 解析 name/signature，唯一匹配得到 `Method*`。
 4. 按当前平台解析 `libjvm` local symbol，调用 `Thread::current()` 取当前 HotSpot 线程，再调用 `WhiteBox::compile_method(Method*, int, int, JavaThread*)` 让 carrier 生成合法 nmethod。
 5. 给 target 的 `MethodFlags` 打 not-compilable 和 dont-inline 标记，避免 target 之后被 JVM 自己编译覆盖，也避免编译调用方把 target 的 Java bytecode inline 进去。
 6. 按 `Method::set_code` 的发布顺序写 target：
@@ -77,7 +77,7 @@ storeFence
 target._from_interpreted_entry = carrier._from_interpreted_entry
 ```
 
-所有 native 地址读写都走 FFM `MemorySegment`，没有 `Unsafe`、slot 扫描或 oop 地址解码。
+所有 native 地址读写都走 FFM `MemorySegment`，没有 `Unsafe`、JNI `jobject` local/global ref、`jmethodID`、Java `Method.slot` 或 oop 地址解码。
 
 raw `byte[]` 机器码路径：
 
@@ -156,30 +156,22 @@ static ByteSize interpreter_entry_offset() { return byte_offset_of(Method, _i2i_
 
 ### Method* 解析
 
-[`src/hotspot/share/prims/jni.cpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/prims/jni.cpp#L362-L380)：
+当前实现不再走 JNI `FromReflectedMethod`。它复刻的是 HotSpot 里 `Method` 与 `InstanceKlass` 的元数据关系：
 
-```cpp
-oop reflected = JNIHandles::resolve_non_null(method);
-mirror = java_lang_reflect_Method::clazz(reflected);
-slot   = java_lang_reflect_Method::slot(reflected);
-Klass* k1 = java_lang_Class::as_Klass(mirror);
-k1->initialize(CHECK_NULL);
-Method* m = InstanceKlass::cast(k1)->method_with_idnum(slot);
-ret = m == nullptr ? nullptr : m->jmethod_id();
+```text
+ClassLoaderDataGraph::_head
+  -> ClassLoaderData::_klasses
+  -> Klass::_next_link
+  -> Klass::_name
+  -> InstanceKlass::_methods
+  -> Method::_constMethod
+  -> ConstMethod::_constants/_name_index/_signature_index
+  -> ConstantPool symbol table
 ```
 
-[`src/hotspot/share/oops/method.cpp`](https://github.com/openjdk/jdk/blame/548a95379f159a0dc369f6bb80d8167ec835c7cd/src/hotspot/share/oops/method.cpp#L2144-L2155)：
+`HotSpotMethodMetadata.methodAddress(Method)` 会先把反射 `Method` 转成 `(holder internal name, method name, descriptor)`，然后在扫描结果里找唯一的 `Method*`。如果同名 class 在多个 `ClassLoaderData` 中同时存在且方法签名也相同，会抛出歧义错误，避免静默拿错 class loader 的方法。这里有意不裸读 `Klass::_java_mirror` 或 `ClassLoaderData::_class_loader` 的 `OopHandle`，因为 `OopHandle::resolve()` 需要走 `NativeAccess<>::oop_load` 的 GC barrier 路径，纯 Java/FFM 直接读 slot 不合法。
 
-```cpp
-Method* Method::checked_resolve_jmethod_id(jmethodID mid) {
-  if (mid == nullptr) return nullptr;
-  Method* o = resolve_jmethod_id(mid);
-  if (o == nullptr) return nullptr;
-  return o->method_holder()->is_loader_alive() ? o : nullptr;
-}
-```
-
-PoC 不直接读 Java `Method.slot`。Java 侧通过已加载的 `JniMethodAddressBridge.resolve(Method)` 让 JVM 把 `Method` 当 `jobject` 传给 upcall；upcall 先调 JNI `FromReflectedMethod` 得到 `jmethodID`，再调 `Method::checked_resolve_jmethod_id` 得到 `Method*`。
+作为对照，HotSpot 的 JNI `FromReflectedMethod` 是从反射对象读 `clazz + slot`，再调用 `InstanceKlass::method_with_idnum(slot)`。本项目没有读取 Java `Method.slot`，因此不需要 `--add-opens java.base/java.lang.reflect`。
 
 ### nmethod 发布顺序
 
@@ -355,7 +347,6 @@ methodFlagsOffset = offset(Method::_intrinsic_id) - sizeof(MethodFlags::_status)
 当前 `compileNow` 验证了 macOS arm64 + Corretto 25、GraalVM JDK 25，以及 OrbStack Linux aarch64 + Corretto 25.0.1。它依赖 HotSpot-family `libjvm` 保留这些 local C++ symbol：
 
 ```text
-_ZN6Method26checked_resolve_jmethod_idEP10_jmethodID
 _ZN6Thread7currentEv
 _ZN8WhiteBox14compile_methodEP6MethodiiP10JavaThread
 _ZN6Method13get_i2c_entryEv
