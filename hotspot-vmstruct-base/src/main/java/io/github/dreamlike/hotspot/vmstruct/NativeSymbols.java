@@ -7,5 +7,7 @@ public sealed interface NativeSymbols permits MachO, Elf, PeCoff {
 
     long methodGetI2cEntry();
 
+    long methodSetNativeFunction();
+
     NativeCode installCodeBlob(String name, byte[] code);
 }

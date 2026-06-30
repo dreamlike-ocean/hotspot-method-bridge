@@ -52,6 +52,11 @@ public final class MachO implements NativeSymbols {
         return symbol("_ZN6Method13get_i2c_entryEv");
     }
 
+    @Override
+    public long methodSetNativeFunction() {
+        return symbol("_ZN6Method19set_native_functionEPhb");
+    }
+
     private long bufferBlobCreate() {
         return symbol("_ZN10BufferBlob6createEPKcj");
     }

@@ -21,6 +21,9 @@ final class MethodRuntimeBridge {
     private static final MethodHandle METHOD_GET_I2C_ENTRY = HotSpotMemory.LINKER.downcallHandle(
             MemorySegment.ofAddress(HotSpotMethodBridge.NATIVE_SYMBOLS.methodGetI2cEntry()),
             FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS));
+    private static final MethodHandle METHOD_SET_NATIVE_FUNCTION = HotSpotMemory.LINKER.downcallHandle(
+            MemorySegment.ofAddress(HotSpotMethodBridge.NATIVE_SYMBOLS.methodSetNativeFunction()),
+            FunctionDescriptor.ofVoid(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_BOOLEAN));
 
     private MethodRuntimeBridge() {
     }
@@ -42,6 +45,17 @@ final class MethodRuntimeBridge {
         try {
             MemorySegment entry = (MemorySegment) METHOD_GET_I2C_ENTRY.invokeExact(MemorySegment.ofAddress(method));
             return entry.address();
+        } catch (Throwable e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    static void setNativeFunction(long method, long function) {
+        try {
+            METHOD_SET_NATIVE_FUNCTION.invokeExact(
+                    MemorySegment.ofAddress(method),
+                    MemorySegment.ofAddress(function),
+                    false);
         } catch (Throwable e) {
             throw new RuntimeException(e);
         }

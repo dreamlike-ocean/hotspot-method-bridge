@@ -6,9 +6,11 @@ import io.github.dreamlike.hotspot.vmstruct.NativeCode;
 import io.github.dreamlike.hotspot.vmstruct.NativeSymbols;
 import io.github.dreamlike.hotspot.vmstruct.NativeSymbolsHolder;
 
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.VarHandle;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.concurrent.locks.LockSupport;
 
@@ -82,6 +84,31 @@ public final class HotSpotMethodBridge {
         return new RawCodeLink(targetMethod, rawCode.blob(), rawCode.entry(), rawCode.size(), i2cEntry);
     }
 
+    /**
+     * 把一个 {@code native} Java 方法绑定到给定 JNI 函数入口。
+     *
+     * <p>这不是调用 {@code JNIEnv->RegisterNatives}，而是直接模拟它最终执行的
+     * {@code Method::set_native_function(entry, false)}。因此调用方不需要构造
+     * {@code jclass} handle，也不会受 {@code FindClass} 的 classloader/hidden class
+     * 解析限制。
+     *
+     * <p>{@code function} 必须是符合 JNI native ABI 的入口。静态方法的前两个参数是
+     * {@code JNIEnv*} 和 {@code jclass}；实例方法的前两个参数是 {@code JNIEnv*}
+     * 和 {@code jobject}。如果入口来自 FFM upcall stub，创建它的 {@code Arena}
+     * 必须比这个绑定活得更久。
+     */
+    public static NativeFunctionLink registerNative(Method target, MemorySegment function) {
+        if (!Modifier.isNative(target.getModifiers())) {
+            throw new IllegalArgumentException("target is not native: " + target);
+        }
+        if (function.address() == 0) {
+            throw new IllegalArgumentException("native function is NULL");
+        }
+        long targetMethod = methodAddress(target);
+        MethodRuntimeBridge.setNativeFunction(targetMethod, function.address());
+        return new NativeFunctionLink(targetMethod, function.address());
+    }
+
     private static String rawCodeBlobName(Method target, byte[] code) {
         return "hotspot-method-bridge " + target.toGenericString()
                 + " " + code.length + "b/" + Integer.toUnsignedString(Arrays.hashCode(code), 16);
@@ -151,6 +178,9 @@ public final class HotSpotMethodBridge {
     }
 
     public record RawCodeLink(long targetMethod, long blob, long entry, int size, long interpretedEntry) {
+    }
+
+    public record NativeFunctionLink(long targetMethod, long function) {
     }
 
 }

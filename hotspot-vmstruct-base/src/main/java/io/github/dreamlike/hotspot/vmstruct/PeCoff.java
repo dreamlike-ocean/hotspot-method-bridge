@@ -17,6 +17,11 @@ public final class PeCoff implements NativeSymbols {
     }
 
     @Override
+    public long methodSetNativeFunction() {
+        throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
+    }
+
+    @Override
     public NativeCode installCodeBlob(String name, byte[] code) {
         throw new UnsupportedOperationException("PE/COFF symbol lookup is not implemented");
     }

@@ -5,6 +5,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.foreign.Arena;
+import java.lang.foreign.FunctionDescriptor;
+import java.lang.foreign.Linker;
+import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Method;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -12,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class HotSpotMethodBridgeTest {
+    private static final Arena NATIVE_ARENA = Arena.global();
     private static long targetCount;
     private static long carrierCount;
     private static Method target;
@@ -35,6 +44,12 @@ final class HotSpotMethodBridgeTest {
 
     public static void compiledCaller() {
         target();
+    }
+
+    public static native long nativePlusOne(long value);
+
+    public static long nativePlusOneImpl(MemorySegment env, MemorySegment clazz, long value) {
+        return value + 1;
     }
 
     @BeforeAll
@@ -98,5 +113,28 @@ final class HotSpotMethodBridgeTest {
         }
         assertEquals(0, targetCount);
         assertEquals(10_000, carrierCount);
+    }
+
+    @Test
+    @DisplayName("native 方法可以直接绑定到 FFM upcall stub")
+    void nativeMethodCanBindToFfmUpcallStub() throws Throwable {
+        Method nativeMethod = HotSpotMethodBridgeTest.class.getDeclaredMethod("nativePlusOne", long.class);
+        MethodHandle implementation = MethodHandles.lookup().findStatic(
+                HotSpotMethodBridgeTest.class,
+                "nativePlusOneImpl",
+                MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class, long.class));
+        MemorySegment stub = Linker.nativeLinker().upcallStub(
+                implementation,
+                FunctionDescriptor.of(
+                        ValueLayout.JAVA_LONG,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.ADDRESS,
+                        ValueLayout.JAVA_LONG),
+                NATIVE_ARENA);
+
+        HotSpotMethodBridge.NativeFunctionLink link = HotSpotMethodBridge.registerNative(nativeMethod, stub);
+
+        assertEquals(stub.address(), link.function());
+        assertEquals(42L, nativePlusOne(41L));
     }
 }
