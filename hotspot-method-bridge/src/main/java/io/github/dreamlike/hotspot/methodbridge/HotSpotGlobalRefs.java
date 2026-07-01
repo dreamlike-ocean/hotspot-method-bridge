@@ -39,7 +39,7 @@ public final class HotSpotGlobalRefs {
             MethodHandle fromJObject = lookup.findStatic(
                     HotSpotGlobalRefs.class,
                     "fromJObject0Impl",
-                    MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class, long.class)
+                    MethodType.methodType(MemorySegment.class, MemorySegment.class, MemorySegment.class, long.class)
             );
             NEW_GLOBAL_REF_LINK = register(
                     "newGlobalRef0",
@@ -56,7 +56,7 @@ public final class HotSpotGlobalRefs {
                     MethodType.methodType(Object.class, long.class),
                     fromJObject,
                     FunctionDescriptor.of(
-                            ValueLayout.JAVA_LONG,
+                            ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS,
                             ValueLayout.JAVA_LONG
@@ -85,6 +85,12 @@ public final class HotSpotGlobalRefs {
         return GlobalRef.wrap(ref);
     }
 
+    /**
+     * 把当前仍有效的 JNI {@code jobject} handle 转回 Java 对象。
+     *
+     * <p>{@code address} 可以是 global ref，也可以是当前 JNI native frame/JVMTI
+     * callback 内仍有效的 local ref。这个方法不会让 stale local ref 变安全。
+     */
     public static Object fromJObject(long address) {
         if (address == 0) {
             return null;
@@ -113,7 +119,7 @@ public final class HotSpotGlobalRefs {
         return JNIEnv.of(env).newGlobalRef(object).address();
     }
 
-    private static long fromJObject0Impl(MemorySegment env, MemorySegment clazz, long jobject) {
-        return jobject;
+    private static MemorySegment fromJObject0Impl(MemorySegment env, MemorySegment clazz, long jobject) {
+        return MemorySegment.ofAddress(jobject);
     }
 }

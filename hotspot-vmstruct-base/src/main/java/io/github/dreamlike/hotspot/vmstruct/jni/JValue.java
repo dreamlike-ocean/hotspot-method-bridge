@@ -78,6 +78,12 @@ public final class JValue {
         return new JValue(Kind.DOUBLE, Double.doubleToRawLongBits(value), MemorySegment.NULL);
     }
 
+    /**
+     * 写入 {@code jvalue.l}。
+     *
+     * <p>这里保存的是 JNI handle 本身，不会把 local reference 升级成 global
+     * reference；调用方必须保证这个 handle 在目标 JNI 调用期间仍然有效。
+     */
     public static JValue ofObject(MemorySegment value) {
         return new JValue(Kind.OBJECT, 0, value);
     }

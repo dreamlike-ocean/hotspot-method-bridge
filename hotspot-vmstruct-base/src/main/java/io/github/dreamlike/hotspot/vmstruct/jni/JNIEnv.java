@@ -43,10 +43,10 @@ import static java.lang.foreign.ValueLayout.JAVA_INT;
  * {@code JNIEnv*}，以及按 {@code JNINativeInterface_} 函数表调用 JNI 入口。
  *
  * <p>注意：JNI 返回的 {@code jobject}/{@code jclass}/{@code jstring} 默认是
- * local reference。它们的生命周期属于真实 JNI native frame 或 JVMTI callback
- * 当前回调范围。普通 Java 代码通过 FFM 逐个 downcall JNI 函数时，不能把 local
- * reference 当成跨多次 downcall 的稳定引用；需要长期持有时应在有效 JNI frame
- * 内转成 global reference。
+ * local reference。它们的生命周期属于真实 JNI native frame、JVMTI callback
+ * 当前回调范围，或者 HotSpot native wrapper 调用当前范围。普通 Java 代码通过
+ * FFM 逐个 downcall JNI 函数时，不能把 local reference 当成跨多次 downcall
+ * 的稳定引用；需要长期持有时应在有效 JNI frame 内转成 global reference。
  */
 public final class JNIEnv {
     public static final int JNI_OK = 0;
@@ -126,6 +126,12 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 {@code FindClass} 产生的 JNI local {@code jclass}。
+     *
+     * <p>调用方必须保证当前处在真实 JNI native frame、JVMTI callback 或等价的
+     * HotSpot native wrapper 内，并且只在该范围内消费返回值。
+     */
     public MemorySegment findClassLocal(String internalName) {
         Objects.requireNonNull(internalName, "internalName");
         try (Arena arena = Arena.ofConfined()) {
@@ -143,6 +149,15 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 在当前 JNI local frame 内把 {@code FindClass} 结果转成 global reference。
+     *
+     * @deprecated 这个方法会把 {@code FindClass} 返回的 local ref 继续传给
+     * {@code NewGlobalRef}/{@code DeleteLocalRef}。只应在真实 JNI native frame、
+     * JVMTI callback 或等价 HotSpot native wrapper 内使用；普通 Java 代码不要把
+     * 这条 direct FFM downcall 链当作稳定转换路径。
+     */
+    @Deprecated
     public GlobalRef findClass(String internalName) {
         MemorySegment local = findClassLocal(internalName);
         try {
@@ -152,6 +167,10 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * @deprecated 同 {@link #findClass(String)}。
+     */
+    @Deprecated
     public GlobalRef findClass(Class<?> type) {
         if (type.isPrimitive()) {
             throw new IllegalArgumentException("primitive class has no JNI class handle: " + type);
@@ -187,6 +206,12 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 基于当前仍有效的 JNI handle 创建 global reference。
+     *
+     * <p>{@code object} 可以是 global ref，也可以是当前 JNI/JVMTI/native-wrapper
+     * 范围内仍有效的 local ref。这个方法不能修复已经离开 local frame 的 stale handle。
+     */
     public MemorySegment newGlobalRef(MemorySegment object) {
         try {
             MemorySegment result = (MemorySegment) NEW_GLOBAL_REF_MH.invokeExact(
@@ -201,6 +226,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 同 {@link #newGlobalRef(MemorySegment)}，并把结果包装成 {@link GlobalRef}。
+     */
     public GlobalRef globalRef(MemorySegment object) {
         MemorySegment global = newGlobalRef(object);
         if (isNull(global)) {
@@ -225,6 +253,11 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 删除当前 JNI local frame 中的 local reference。
+     *
+     * <p>不要把已经离开 local frame 的 handle 传进来；也不要用于 global reference。
+     */
     public void deleteLocalRef(MemorySegment localRef) {
         if (localRef == MemorySegment.NULL) {
             return;
@@ -246,6 +279,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jclass}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment getObjectClass(MemorySegment object) {
         try {
             MemorySegment result = (MemorySegment) GET_OBJECT_CLASS_MH.invokeExact(
@@ -298,6 +334,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jobject}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment callStaticObjectMethodA(MemorySegment clazz, MemorySegment methodId, MemorySegment args) {
         try {
             MemorySegment result = (MemorySegment) CALL_STATIC_OBJECT_METHOD_A_MH.invokeExact(
@@ -316,6 +355,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jobject}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment callObjectMethodA(MemorySegment object, MemorySegment methodId, MemorySegment args) {
         try {
             MemorySegment result = (MemorySegment) CALL_OBJECT_METHOD_A_MH.invokeExact(
@@ -349,6 +391,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jstring}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment newStringUtf(String value) {
         Objects.requireNonNull(value, "value");
         try (Arena arena = Arena.ofConfined()) {
@@ -376,6 +421,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jbyteArray}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment newByteArray(int length) {
         try {
             MemorySegment result = (MemorySegment) NEW_BYTE_ARRAY_MH.invokeExact(
@@ -392,6 +440,9 @@ public final class JNIEnv {
         }
     }
 
+    /**
+     * 返回 JNI local {@code jbyteArray}；只在当前 JNI/JVMTI/native-wrapper 范围内有效。
+     */
     public MemorySegment newByteArray(byte[] bytes) {
         MemorySegment array = newByteArray(bytes.length);
         try (Arena arena = Arena.ofConfined()) {
