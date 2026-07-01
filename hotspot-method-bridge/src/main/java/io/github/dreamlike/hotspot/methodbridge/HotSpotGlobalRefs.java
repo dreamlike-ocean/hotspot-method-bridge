@@ -26,7 +26,7 @@ import java.util.Objects;
 public final class HotSpotGlobalRefs {
     private static final Arena UPCALL_ARENA = Arena.global();
     private static final HotSpotMethodBridge.NativeFunctionLink NEW_GLOBAL_REF_LINK;
-    private static final HotSpotMethodBridge.NativeFunctionLink IS_SAME_OBJECT_LINK;
+    private static final HotSpotMethodBridge.NativeFunctionLink FROM_JOBJECT_LINK;
 
     static {
         try {
@@ -36,10 +36,10 @@ public final class HotSpotGlobalRefs {
                     "newGlobalRef0Impl",
                     MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class, MemorySegment.class)
             );
-            MethodHandle isSameObject = lookup.findStatic(
+            MethodHandle fromJObject = lookup.findStatic(
                     HotSpotGlobalRefs.class,
-                    "isSameObject0Impl",
-                    MethodType.methodType(byte.class, MemorySegment.class, MemorySegment.class, long.class, MemorySegment.class)
+                    "fromJObject0Impl",
+                    MethodType.methodType(long.class, MemorySegment.class, MemorySegment.class, long.class)
             );
             NEW_GLOBAL_REF_LINK = register(
                     "newGlobalRef0",
@@ -51,16 +51,16 @@ public final class HotSpotGlobalRefs {
                             ValueLayout.ADDRESS,
                             ValueLayout.ADDRESS)
             );
-            IS_SAME_OBJECT_LINK = register(
-                    "isSameObject0",
-                    MethodType.methodType(byte.class, long.class, Object.class),
-                    isSameObject,
+            FROM_JOBJECT_LINK = register(
+                    "fromJObject0",
+                    MethodType.methodType(Object.class, long.class),
+                    fromJObject,
                     FunctionDescriptor.of(
-                            ValueLayout.JAVA_BYTE,
-                            ValueLayout.ADDRESS,
-                            ValueLayout.ADDRESS,
                             ValueLayout.JAVA_LONG,
-                            ValueLayout.ADDRESS)
+                            ValueLayout.ADDRESS,
+                            ValueLayout.ADDRESS,
+                            ValueLayout.JAVA_LONG
+                    )
             );
         } catch (ReflectiveOperationException e) {
             throw new ExceptionInInitializerError(e);
@@ -85,13 +85,11 @@ public final class HotSpotGlobalRefs {
         return GlobalRef.wrap(ref);
     }
 
-    /**
-     * 用 JNI {@code IsSameObject} 判断 global reference 与 Java 对象是否指向同一对象。
-     */
-    public static boolean isSameObject(GlobalRef ref, Object object) {
-        Objects.requireNonNull(ref, "ref");
-        Objects.requireNonNull(object, "object");
-        return isSameObject0(ref.address(), object) != 0;
+    public static Object fromJObject(long address) {
+        if (address == 0) {
+            return null;
+        }
+        return fromJObject0(address);
     }
 
     private static HotSpotMethodBridge.NativeFunctionLink register(
@@ -109,13 +107,13 @@ public final class HotSpotGlobalRefs {
 
     private static native long newGlobalRef0(Object object);
 
-    private static native byte isSameObject0(long ref, Object object);
+    private static native Object fromJObject0(long jobject);
 
     private static long newGlobalRef0Impl(MemorySegment env, MemorySegment clazz, MemorySegment object) {
         return JNIEnv.of(env).newGlobalRef(object).address();
     }
 
-    private static byte isSameObject0Impl(MemorySegment env, MemorySegment clazz, long ref, MemorySegment object) {
-        return (byte) (JNIEnv.of(env).isSameObject(MemorySegment.ofAddress(ref), object) ? 1 : 0);
+    private static long fromJObject0Impl(MemorySegment env, MemorySegment clazz, long jobject) {
+        return jobject;
     }
 }

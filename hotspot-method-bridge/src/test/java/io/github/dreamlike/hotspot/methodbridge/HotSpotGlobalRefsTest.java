@@ -5,6 +5,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 final class HotSpotGlobalRefsTest {
@@ -16,7 +17,8 @@ final class HotSpotGlobalRefsTest {
 
         try (GlobalRef ref = HotSpotGlobalRefs.newGlobalRef(object)) {
             assertNotEquals(0, ref.address());
-            assertTrue(HotSpotGlobalRefs.isSameObject(ref, object));
+            Object res = HotSpotGlobalRefs.fromJObject(ref.address());
+            assertSame(object, res);
         }
     }
 }
